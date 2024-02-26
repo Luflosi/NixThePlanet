@@ -97,31 +97,59 @@ in
         Whether to open the sshPort and vncDisplayNumber on the networking.firewall
       '';
     };
+    startWhenNeeded = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = lib.mdDoc ''
+        If set, the VM is socket-activated; that is,
+        instead of having it permanently running as a daemon,
+        systemd will start it on the first incoming VNC or SSH connection.
+      '';
+    };
   };
   config = let
+    vncPort = 5900 + cfg.vncDisplayNumber;
     run-macos = cfg.package.makeRunScript {
       diskImage = cfg.package;
-      extraQemuFlags = [ "-vnc ${cfg.vncListenAddr}:${toString cfg.vncDisplayNumber}" ] ++ cfg.extraQemuFlags;
+      extraQemuFlags = [
+        "-add-fd fd=3,set=2,opaque='vnc socket' "
+        #-add-fd fd=4,set=2,opaque="rdonly:/path/to/file" \
+        # -drive file=/dev/fdset/2,index=0,media=disk
+        "-vnc unix:/dev/fdset/2"
+      ] ++ cfg.extraQemuFlags;
       inherit (cfg) threads cores sockets mem sshListenAddr sshPort;
     };
   in lib.mkIf cfg.enable {
-    networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [ (5900 + cfg.vncDisplayNumber) cfg.sshPort ];
+    networking.firewall.allowedTCPPorts = lib.optionals cfg.openFirewall [ vncPort cfg.sshPort ];
     systemd = {
       services.macos-ventura = {
         preStart = lib.optionalString cfg.stateless ''
           rm -f *.qcow2
         '';
         description = "macOS Ventura";
-        wantedBy = [ "multi-user.target" ];
+        wantedBy = lib.optionals (!cfg.startWhenNeeded) [ "multi-user.target" ];
         serviceConfig = {
           Type = "simple";
           ExecStart = "${lib.getExe run-macos}";
-          Restart = "always";
+          Restart = "on-failure";
           DynamicUser = true;
           StateDirectory = baseNameOf cfg.dataDir;
           WorkingDirectory = cfg.dataDir;
+          Sockets = [ "macos-ventura-vnc.socket" "macos-ventura-ssh.socket" ];
         };
       };
+      sockets.macos-ventura-vnc = {
+        description = "macOS Ventura VNC socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig.ListenStream = [ "${cfg.vncListenAddr}:${toString vncPort}" ];
+        socketConfig.Service = "macos-ventura.service";
+      };
+      /*sockets.macos-ventura-ssh = {
+        description = "macOS Ventura SSH socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig.ListenStream = [ "${cfg.sshListenAddr}:${toString cfg.sshPort}" ];
+        socketConfig.Service = "macos-ventura.service";
+      };*/
     };
   };
 }
